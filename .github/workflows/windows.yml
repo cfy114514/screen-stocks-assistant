@@ -1,0 +1,28 @@
+name: Windows build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Test strategies and persistence
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Build portable package
+        shell: pwsh
+        run: ./build.ps1
+      - name: Test packaged app against an isolated fake game
+        run: python tests/smoke_package.py dist/ScreenStocksAssistant.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenStocksAssistant-windows-x64
+          path: artifacts/*

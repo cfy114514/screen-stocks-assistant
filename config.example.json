@@ -1,0 +1,5 @@
+{
+  "game_dir": "C:\\Users\\YOUR_NAME\\AppData\\LocalLow\\Conradical Games\\Screen Stocks",
+  "game_managed_stocks": ["$BANK", "$BUBL"],
+  "manage_existing_shorts": false
+}
