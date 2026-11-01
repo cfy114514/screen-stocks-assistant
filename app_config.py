@@ -4,7 +4,15 @@ import os
 import sys
 from pathlib import Path
 
-VERSION = '0.1.0'
+VERSION = '0.1.1'
+
+def configure_text_streams():
+    # A status message must not abort an order after its command was submitted.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, 'reconfigure'):
+            stream.reconfigure(errors='backslashreplace')
+
+configure_text_streams()
 ASSETS = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 DATA = Path(os.environ.get('SSA_DATA_DIR') or Path(os.environ.get('LOCALAPPDATA', Path.home()/'AppData/Local'))/'ScreenStocksAssistant').resolve()
 DEFAULT_GAME = Path(os.environ.get('USERPROFILE', str(Path.home())))/'AppData/LocalLow/Conradical Games/Screen Stocks'
@@ -19,6 +27,7 @@ GAME = Path(os.environ.get('SSA_GAME_DIR') or CONFIG['game_dir']).expanduser().r
 GAME_MANAGED = set(CONFIG['game_managed_stocks'])
 
 def prepare_runtime():
+    configure_text_streams()
     DATA.mkdir(parents=True, exist_ok=True)
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(json.dumps(CONFIG, ensure_ascii=False, indent=2), encoding='utf-8')

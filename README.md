@@ -20,7 +20,7 @@
 
 2. 在 `SettingsData.value` 下，把 `"modSupport": false` 改成 `"modSupport": true`，保留其他内容。
 3. 启动游戏并进入在线市场，等待生成 `mods\export\market.json`、`history.json`。
-4. 从 Release 下载 `ScreenStocksAssistant-v0.1.0-windows-x64.zip`，解压后双击 `ScreenStocksAssistant.exe`。不需要安装 Python。
+4. 从 Release 下载 `ScreenStocksAssistant-v0.1.1-windows-x64.zip`，解压后双击 `ScreenStocksAssistant.exe`。不需要安装 Python。
 5. 浏览器自动打开本地控制页。**默认不启动实际交易**；确认规则后，才能点击“启动自动交易”。
 
 更完整的路径、文件内容示例和故障排查见 [启用教程](docs/启用教程.md)。
@@ -71,7 +71,7 @@ python -m venv .venv
 .\build.ps1 -Python .\.venv\Scripts\python.exe
 ```
 
-输出为 `dist\ScreenStocksAssistant.exe` 和 `artifacts\ScreenStocksAssistant-v0.1.0-windows-x64.zip`。构建不读取游戏或个人交易数据。CI 也会运行测试并构建 Windows 包。
+输出为 `dist\ScreenStocksAssistant.exe` 和 `artifacts\ScreenStocksAssistant-v0.1.1-windows-x64.zip`。构建不读取游戏或个人交易数据。CI 也会运行测试并构建 Windows 包。
 
 ## 说明
 
