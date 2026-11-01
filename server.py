@@ -95,7 +95,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             if self.path == '/auto/stop':
                 (ROOT/'停止自动交易.flag').write_text('stop',encoding='utf-8')
-                self.reply_json({'message':'已请求停止；正在等待已提交的指令结果。'}); return
+                self.reply_json({'message':'已请求停止新指令；待确认记录会保留，游戏仍可能完成已提交指令。'}); return
             if worker and worker.poll() is None:
                 self.reply_json({'message':'自动交易已在运行。'}); return
             try:
@@ -140,6 +140,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 event_signals,event_stocks=plan_events(m,list(merged.values()),data.setdefault('eventBooks',{}),int(time.time()*1000),GAME_MANAGED,h)
                 data['liveSignals']=[s for s in data['liveSignals'] if s['id'] not in event_stocks]+event_signals
                 data['liveSignals']=[apply_buy_policy(s,m) for s in data['liveSignals']]
+                data['liveSignals']=[s for s in data['liveSignals'] if s['id'] not in data.get('recoveryBlockedStocks',{})]
             except (OSError,ValueError):
                 data['liveSignals']=[]
             data['logCount']=len(data.get('log',[]))

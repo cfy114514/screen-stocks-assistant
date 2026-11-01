@@ -8,7 +8,7 @@ sys.path.insert(0,str(ROOT))
 from app_config import VERSION
 out=ROOT/'artifacts';out.mkdir(exist_ok=True)
 dest=out/f'ScreenStocksAssistant-v{VERSION}-windows-x64.zip'
-files=['dist/ScreenStocksAssistant.exe','README.md','docs/启用教程.md','docs/交易规则.md','LICENSE','config.example.json']
+files=['dist/ScreenStocksAssistant.exe','README.md','docs/启用教程.md','docs/交易规则.md','CHANGELOG.md','LICENSE','config.example.json']
 with zipfile.ZipFile(dest,'w',zipfile.ZIP_DEFLATED) as z:
     for name in files:
         arc=name.removeprefix('dist/')

@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-VERSION = '0.1.1'
+VERSION = '0.1.2'
 
 def configure_text_streams():
     # A status message must not abort an order after its command was submitted.

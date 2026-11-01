@@ -34,6 +34,9 @@ def plan_events(market, events, books, now, excluded=(), history=None):
             managed.add(sid)
             if book.get('scheduledAt') and book['scheduledAt']!=at:book.pop('postEventPeak',None)
             book.update(target=str(target),scheduledAt=at,freezeStart=at-90*60000,price=str(price),currentlyAnnounced=live,budget=str(dec(book['spent'])+cash),budgetMode='available-cash')
+            if book.get('recoveryRequired'):
+                book['status']='旧事件指令结果无法确认，请核对持仓后再恢复该股事件管理'
+                continue
             if book.get('closed'):continue
             book.setdefault('coreShares',str(owned/2))
             book['peak']=str(max(dec(book.get('peak')),price) if owned>0 else price)

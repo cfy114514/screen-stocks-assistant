@@ -5,6 +5,7 @@ from strategy import calculate, dec, apply_buy_policy
 from event_strategy import plan_events
 from decimal import localcontext
 from app_config import DATA, GAME, GAME_MANAGED, CONFIG, prepare_runtime
+from game_session import GameSessionProbe
 
 ROOT=DATA
 MODS=GAME/'mods'
@@ -38,13 +39,78 @@ def save(path, data, retry_replace=False):
             time.sleep(min(.02*2**attempt,.2))
 
 class Trader:
-    def __init__(self, root=MODS, statepath=STATE):
+    def __init__(self, root=MODS, statepath=STATE, session_provider=None):
         self.root=Path(root); self.path=Path(statepath)
         self.state=load(self.path) if self.path.exists() else {'version':1,'pending':None,'active':[],'log':[]}
         self.state.setdefault('manageExistingShorts',bool(CONFIG.get('manage_existing_shorts',False)))
         self.paused=False
         self.last_save=0
         self.last_sequence=None
+        self.session_provider=session_provider
+        self.restart_probe=None
+
+    def session(self):
+        try:return self.session_provider() if self.session_provider else None
+        except OSError:return None
+
+    def waiting(self, message, phase='awaiting_result'):
+        self.state['runtimePhase']=phase
+        self.state['recoveryStatus']=message
+        self.state['stopReason']=''
+        self.persist(force=False)
+
+    def pending_log(self, pending):
+        for entry in reversed(self.state['log']):
+            if entry.get('id')==pending['id'] and entry.get('time')==pending['sentAt']:return entry
+        # Older versions may not have a corresponding complete log entry.
+        entry={'id':pending['id'],'time':pending['sentAt'],'status':'旧指令待核对'}
+        self.state['log'].append(entry)
+        return entry
+
+    def recover_restarted_game(self, market, now, session):
+        pending=self.state['pending']
+        parts=pending['id'].split('/')
+        actions={'buymax','buypercent','shortmax','shortpercent','sellmax','sellpercent','covermax','coverpercent','closemax','closepercent'}
+        if len(parts)!=2 or not re.fullmatch(r'\$[A-Za-z0-9_]+',parts[0]) or parts[1] not in actions:
+            self.waiting('旧指令格式无法识别，需要核对记录');return
+        sid,action=parts
+        player=market.get('player')
+        if not isinstance(player,dict) or not isinstance(player.get('positions'),list):
+            self.waiting('游戏已重启，等待完整持仓快照','recovering_session');return
+        try:command=load(self.root/'commands'/sid/(action+'.json'))
+        except (OSError,ValueError):
+            self.waiting('游戏已重启，旧命令文件暂时不可读；没有重发指令','recovering_session');return
+        if command.get('execute') is not False:
+            self.waiting('游戏已重启，但旧命令仍可能待执行；等待游戏读取，不重发','recovering_session');return
+        pos=next((p for p in player['positions'] if p.get('stockId')==sid),{})
+        if dec(pos.get('sharesOwned'))>0 and dec(pos.get('sharesShorted'))>0:
+            self.waiting('游戏已重启，旧指令股票存在双向持仓，需要核对');return
+        started=int(session['startedAtMs']);written=int(market['writtenAtMs'])
+        if now-started<5000 or written<started:
+            self.waiting('等待重启后的新行情完成同步','recovering_session');return
+        position_signature=tuple(str(dec(pos.get(k))) for k in ('sharesOwned','sharesShorted','averageBuyPrice','averageShortPrice'))
+        signature=(session['pid'],started,position_signature)
+        if not self.restart_probe or self.restart_probe['signature']!=signature:
+            self.restart_probe={'signature':signature,'observedAt':now,'writtenAt':written,'sequence':market.get('sequence')}
+            self.waiting('已识别游戏重启，核对连续持仓快照；旧指令不会重发','recovering_session');return
+        probe=self.restart_probe
+        if now-probe['observedAt']<1000 or written<=probe['writtenAt'] or market.get('sequence')==probe['sequence']:
+            self.waiting('等待第二份独立的新行情确认持仓','recovering_session');return
+        record=dict(pending,recoveredAt=now,outcome='unknown-after-game-restart',replayed=False,newGameSession=session,currentPosition=pos,exportSequence=market.get('sequence'))
+        self.state.setdefault('archivedPending',[]).append(record)
+        self.pending_log(pending).update(status='旧游戏会话回报不可确认，已归档且未重发',recoveredAt=now)
+        if pending.get('eventId'):
+            self.state.setdefault('recoveryBlockedStocks',{})[sid]='旧事件指令结果无法确认，请先核对该股的事件仓位'
+            book=self.state.get('eventBooks',{}).get(pending['eventId'])
+            if book:book['recoveryRequired']=True
+        self.state.setdefault('entryBlockedUntil',{})[sid]=now+90000
+        self.state['active']=[key for key in self.state['active'] if not key.startswith(sid+'|')]
+        self.state['pending']=None
+        self.state['runtimePhase']='watching'
+        self.state['recoveryStatus']='旧会话指令已归档为结果未知，未重发；继续按当前账户状态判断'
+        self.state['lastRecovery']=record
+        self.last_sequence=None;self.restart_probe=None
+        self.persist()
     def persist(self, force=True):
         if not force and time.monotonic()-self.last_save<2: return
         self.state['heartbeat']=int(time.time()*1000)
@@ -59,11 +125,19 @@ class Trader:
     def step(self, market, history, now):
         state=self.state; pending=state['pending']
         if pending:
-            matches=[r for r in market.get('commandResults',[]) if r.get('id')==pending['id'] and int(r.get('run') or 0)>pending['baseline'] and int(r.get('receivedAtMs') or 0)>=pending['sentAt']-5000]
+            if market.get('gameVersion')!='1.0.13' or not market.get('marketReady') or abs(now-int(market.get('writtenAtMs') or 0))>15000:
+                self.waiting('保留旧指令，等待新鲜且兼容的游戏行情；不会重发','waiting_for_market');return
+            session=self.session()
+            old_session=pending.get('gameSession')
+            changed=not old_session or (session and (session.get('pid'),session.get('startedAtMs'))!=(old_session.get('pid'),old_session.get('startedAtMs')))
+            restarted=bool(session and changed and int(session.get('startedAtMs') or 0)>int(pending['sentAt'])+1000)
+            matches=[r for r in market.get('commandResults',[]) if r.get('id')==pending['id'] and int(r.get('run') or 0)>pending['baseline'] and int(r.get('receivedAtMs') or 0)>=pending['sentAt']-5000 and (not restarted or int(r.get('receivedAtMs') or 0)<session['startedAtMs'])]
+            if restarted and not matches:
+                self.recover_restarted_game(market,now,session);return
             if matches:
                 result=max(matches,key=lambda r:int(r.get('run') or 0))
                 if result.get('status') in ('done','failed') and int(result.get('finishedAtMs') or 0)>0:
-                    state['log'][-1].update(status=result['status'],reason_result=result.get('reason',''),run=result.get('run'),finishedAt=result['finishedAtMs'])
+                    self.pending_log(pending).update(status=result['status'],reason_result=result.get('reason',''),run=result.get('run'),finishedAt=result['finishedAtMs'])
                     if result['status']=='failed':
                         state['pending']=None; state['stopReason']='游戏返回交易失败：'+str(result.get('reason','未知原因')); self.paused=True; self.persist(); return
                     pending['finishedAt']=int(result['finishedAtMs'])
@@ -101,17 +175,17 @@ class Trader:
                     if action in ('sellmax','covermax') or pending.get('signalAction')=='事件波段卖出':
                         state.setdefault('entryBlockedUntil',{})[sid]=now+90000
                     if action=='sellmax' and sid=='$PLAIN': state['resetHold']=False
-                    state['pending']=None; self.persist(); return
+                    state['pending']=None;state['runtimePhase']='watching';state['recoveryStatus']='';self.persist(); return
             if state['pending'] and now-pending['sentAt']>20000:
-                self.paused=True
-                state['stopReason']='指令或持仓结果超过20秒未确认，暂停以避免重复下单'
-                print('命令结果未确认，已暂停；请检查游戏和交易记录。',flush=True)
+                self.waiting('指令超过20秒未确认：正在核对结果，暂不提交新交易，也不会重发')
             elif state['pending']:
-                self.persist(force=False)
+                self.waiting('等待游戏成交回报及持仓更新')
             return
         if self.paused: return
         if market.get('gameVersion')!='1.0.13' or not market.get('marketReady') or abs(now-int(market.get('writtenAtMs') or 0))>15000:
+            self.waiting('等待新鲜且兼容的游戏行情','waiting_for_market')
             return
+        state['runtimePhase']='watching';state['recoveryStatus']=''
         sequence=(market.get('sequence'),market.get('writtenAtMs'))
         if market.get('sequence') is not None and sequence==self.last_sequence:
             self.persist(force=False); return
@@ -141,6 +215,7 @@ class Trader:
             key=sig['id']+'|'+sig['action']
             if key in active and not sig.get('eventManaged'): continue
             sid=sig['id']
+            if sid in state.get('recoveryBlockedStocks',{}):continue
             if sid in GAME_MANAGED: continue
             if not re.fullmatch(r'\$[A-Za-z0-9_]+',sid): continue
             mapping={'买入观察':'buypercent','重置扫货':'buypercent','卖出提示':'sellmax','做空观察':'shortpercent','平空提示':'covermax','事件建仓':'buypercent','事件波段买回':'buypercent','事件波段卖出':'sellpercent','事件平空':'covermax','事件分批止盈':'sellpercent','事件清仓':'sellmax'}
@@ -165,7 +240,7 @@ class Trader:
             if not path.is_file() or load(path).get('execute') is not False:
                 self.paused=True; state['log'].append({'time':now,'id':cmdid,'status':'暂停：命令文件不可用或有未处理指令'}); self.persist(); return
             baseline=max([int(x.get('run') or 0) for x in market.get('commandResults',[]) if x.get('id')==cmdid] or [0])
-            state['pending']={'id':cmdid,'sentAt':now,'baseline':baseline,'beforeShares':str(short if action in ('shortpercent','covermax') else long),'beforeAverage':str(pos.get('averageBuyPrice',0)),'quotedPrice':sig['price'],'eventId':sig.get('eventId'),'eventManaged':sig.get('eventManaged',False),'signalAction':sig['action']}
+            state['pending']={'id':cmdid,'sentAt':now,'baseline':baseline,'beforeShares':str(short if action in ('shortpercent','covermax') else long),'beforeAverage':str(pos.get('averageBuyPrice',0)),'quotedPrice':sig['price'],'eventId':sig.get('eventId'),'eventManaged':sig.get('eventManaged',False),'signalAction':sig['action'],'gameSession':self.session(),'exportSequence':market.get('sequence')}
             active.add(key); state['active']=sorted(active)
             state['log'].append({'time':now,'id':cmdid,'status':'已提交，等待游戏结果','signal':sig['reason'],'quotedPrice':sig['price']})
             self.persist() # On crash, never submit the same order again automatically.
@@ -181,9 +256,10 @@ def main():
     try:
         lock.seek(0); msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
     except OSError: raise RuntimeError('自动交易已经运行。')
-    trader=Trader()
+    trader=Trader(session_provider=GameSessionProbe())
     trader.state['runtimeStatus']='运行中'
     trader.state['stopReason']=''
+    trader.state['runtimePhase']='awaiting_result' if trader.state['pending'] else 'watching'
     trader.persist()
     print('自动交易已启动：每次开仓使用现金的 25%，分别管理多头与空头。',flush=True)
     print('关闭此窗口停止。每笔结果见 自动交易记录.json。',flush=True)
@@ -192,8 +268,8 @@ def main():
     history={}
     while not trader.paused:
         now=int(time.time()*1000)
-        if STOP.exists() and not trader.state['pending']:
-            trader.state['stopReason']='已按停止请求退出'
+        if STOP.exists():
+            trader.state['stopReason']='已按停止请求退出；未确认指令记录仍保留' if trader.state['pending'] else '已按停止请求退出'
             diagnostic('收到停止请求，自动交易已停止。')
             break
         try:
@@ -201,11 +277,7 @@ def main():
         except (OSError,ValueError,KeyError) as e:
             if not read_error:
                 diagnostic('行情暂时无法读取，等待下一次更新：'+repr(e)); read_error=True
-            if trader.state['pending'] and now-trader.state['pending']['sentAt']>20000:
-                trader.state['stopReason']='等待成交结果时行情持续不可读，需要核对订单'
-                diagnostic('等待命令结果时行情持续不可读，已停止；请检查记录后处理。')
-                trader.paused=True
-                break
+            trader.waiting('行情暂时不可读，等待恢复；未确认指令仍保留','waiting_for_market')
             time.sleep(1)
             continue
         if read_error:

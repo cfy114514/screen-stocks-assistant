@@ -9,6 +9,8 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from game_session import inspect_game_session
 
 def wait_for(check, timeout=45):
     deadline=time.monotonic()+timeout
@@ -73,9 +75,37 @@ def main():
             wait_for(lambda:json.loads((data/'自动交易记录.json').read_text(encoding='utf-8'))['pending'] is None,timeout=10)
             request('/auto/stop',True)
             wait_for(lambda:json.loads((data/'自动交易记录.json').read_text(encoding='utf-8')).get('runtimeStatus')=='已停止',timeout=25)
+            # A 0.1.1-style overdue pending command must not cause start/stop loops.
+            import msvcrt
+            def seed_legacy_pending():
+                with (data/'自动交易.lock').open('a+b') as f:
+                    f.seek(0);msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1)
+                    old=json.loads((data/'自动交易记录.json').read_text(encoding='utf-8'))
+                    sent=int(time.time()*1000)-60000
+                    old['pending']={'id':'$TEST/buymax','sentAt':sent,'baseline':1,'beforeShares':'100','beforeAverage':'90','gameSession':inspect_game_session()}
+                    old['log'].append({'id':'$TEST/buymax','time':sent,'status':'已提交，等待游戏结果'})
+                    (data/'自动交易记录.json').write_text(json.dumps(old,ensure_ascii=False),encoding='utf-8')
+                    f.seek(0);msvcrt.locking(f.fileno(),msvcrt.LK_UNLCK,1)
+                    return sent
+            legacy_sent=wait_for(seed_legacy_pending)
+            time.sleep(.3)
+            publish();request('/auto/start',True)
+            wait_for(lambda:(lambda s:s.get('running') and s.get('runtimePhase')=='awaiting_result')(json.loads(request('/auto'))),timeout=15)
+            assert not json.loads((commands/'buymax.json').read_text())['execute']
+            request('/auto/stop',True)
+            stopped=wait_for(lambda:(lambda s:s if s.get('runtimeStatus')=='已停止' else None)(json.loads((data/'自动交易记录.json').read_text(encoding='utf-8'))),timeout=10)
+            assert stopped['pending'], 'Stopping must preserve unresolved order evidence'
+            time.sleep(.3);publish();request('/auto/start',True)
+            wait_for(lambda:(lambda s:s.get('running') and s.get('runtimePhase')=='awaiting_result')(json.loads(request('/auto'))),timeout=15)
+            finished=int(time.time()*1000)
+            market['sequence']=3;market['player']['positions'][0]['sharesOwned']='150'
+            market['commandResults']=[{'id':'$TEST/buymax','run':2,'receivedAtMs':legacy_sent+10,'finishedAtMs':finished,'status':'done','reason':''}]
+            time.sleep(.02);publish()
+            wait_for(lambda:json.loads((data/'自动交易记录.json').read_text(encoding='utf-8'))['pending'] is None,timeout=10)
+            assert not json.loads((commands/'buymax.json').read_text())['execute'], 'Recovery must never replay the old command'
             request('/app/quit',True)
             assert proc.wait(timeout=15)==0
-            print('PASS: packaged launch, assets, no automatic trading, local request validation, duplicate launcher, worker order and acknowledgement, stop and quit')
+            print('PASS: packaged launch, assets, no automatic trading, request validation, single instance, worker order, overdue pending recovery without replay, stop with pending evidence, and quit')
         except Exception:
             for name in ('启动日志.txt','自动交易运行日志.txt','自动交易记录.json'):
                 path=data/name

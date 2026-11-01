@@ -77,5 +77,5 @@ class Review(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d);c=p/'commands/$X';c.mkdir(parents=True);f=c/'shortpercent.json';f.write_text('{"execute":false}')
             t=auto_trade.Trader(p,p/'state.json');m=market();t.step(m,H,N);f.write_text('{"execute":false}')
-            t.step(m,H,N+21000);self.assertTrue(t.paused);self.assertIsNotNone(t.state['pending']);self.assertFalse(json.loads(f.read_text())['execute'])
+            m['writtenAtMs']=N+21000;t.step(m,H,N+21000);self.assertFalse(t.paused);self.assertEqual(t.state['runtimePhase'],'awaiting_result');self.assertIsNotNone(t.state['pending']);self.assertFalse(json.loads(f.read_text())['execute'])
 if __name__=='__main__':unittest.main()
